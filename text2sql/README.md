@@ -37,7 +37,7 @@ Schema 在啟動時以唯讀交易讀取、檢查並快取，再交由 `schema_l
 ## 專案結構
 
 ```text
-mini-text2sql/
+text2sql/
 ├── app.py                 # 啟動、Gradio UI 與流程呼叫
 ├── graph.py               # TypedDict State、Nodes 與 Conditional Edges
 ├── nodes.py               # 六個 Node、提示詞、AST 驗證與回答
@@ -56,7 +56,7 @@ mini-text2sql/
 以下 PowerShell 指令從專案目錄執行，不需要啟用虛擬環境：
 
 ```powershell
-cd mini-text2sql
+cd text2sql
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 Copy-Item .env.example .env
