@@ -1,0 +1,10 @@
+# Direct dependencies verified with Python 3.12.7; transitive versions are resolver-managed.
+langgraph==1.2.16
+langchain==1.4.6
+langchain-ollama==1.1.0
+SQLAlchemy==2.1.5
+psycopg[binary]==3.3.6
+gradio==6.30.0
+python-dotenv==1.2.4
+sqlglot==30.23.0
+pytest==9.1.1
