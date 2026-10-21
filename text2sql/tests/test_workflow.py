@@ -248,7 +248,9 @@ def mocked_connection(monkeypatch):
 
 
 def settings():
-    return Settings("fake-model", "postgresql+psycopg://fake", max_result_rows=2)
+    return Settings(
+        "fake-model", "postgresql+psycopg://fake", TABLES, max_result_rows=2
+    )
 
 
 def test_executor_fetches_only_cap_plus_one(mocked_connection):
@@ -322,6 +324,7 @@ def ollama_settings_env(monkeypatch):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("LLM_MODEL", "gpt-oss:120b-cloud")
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://fake")
+    monkeypatch.setenv("ALLOWED_TABLES", "public.air_quality_hourly")
 
 
 def test_ollama_settings_do_not_require_openai_key(ollama_settings_env):
@@ -372,7 +375,9 @@ def test_ollama_native_response_supplies_only_final_sql(monkeypatch):
     monkeypatch.setattr(config, "ChatOllama", lambda **kwargs: real_chat(**{
         **kwargs, "client_kwargs": {**kwargs["client_kwargs"],
                                     "transport": httpx.MockTransport(handler)}}))
-    llm = config.create_llm(Settings("gpt-oss:120b-cloud", "postgresql+psycopg://fake"))
+    llm = config.create_llm(Settings(
+        "gpt-oss:120b-cloud", "postgresql+psycopg://fake", TABLES
+    ))
     execute = Mock(return_value=RESULT)
     workflow = build_graph(llm, SCHEMA, TABLES, execute)
     state = workflow.invoke(initial_state("查詢 AQI 最大值"))

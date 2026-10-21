@@ -15,22 +15,20 @@ from sqlalchemy.engine import make_url
 class Settings:
     model: str
     database_url: str = field(repr=False)
+    allowed_tables: tuple[str, ...]
     ollama_base_url: str = "http://localhost:11434"
     llm_timeout_seconds: int = 120
-    allowed_tables: tuple[str, ...] = ("public.air_quality_hourly",)
     statement_timeout_ms: int = 5000
     max_result_rows: int = 100
 
 
 def load_settings() -> Settings:
     load_dotenv(Path(__file__).with_name(".env"))
-    required = ("LLM_MODEL", "DATABASE_URL")
+    required = ("LLM_MODEL", "DATABASE_URL", "ALLOWED_TABLES")
     if missing := [key for key in required if not os.getenv(key, "").strip()]:
         raise ValueError("缺少環境變數：" + ", ".join(missing))
     tables = tuple(dict.fromkeys(
-        item.strip() for item in os.getenv(
-            "ALLOWED_TABLES", "public.air_quality_hourly"
-        ).split(",")
+        item.strip() for item in os.environ["ALLOWED_TABLES"].split(",")
     ))
     # Configuration deliberately supports simple, lowercase, schema-qualified names.
     if not tables or any(

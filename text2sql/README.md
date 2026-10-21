@@ -72,7 +72,7 @@ macOS／Linux 使用 `python3 -m venv .venv`、`.venv/bin/python -m pip install 
 | `OLLAMA_BASE_URL` | 預設 `http://localhost:11434`；Ollama 服務網址，不加 `/api` |
 | `LLM_TIMEOUT_SECONDS` | 預設 120；允許 1～600 秒，作為 Ollama HTTP 連線／讀取等操作的逾時 |
 | `DATABASE_URL` | 必填；`postgresql+psycopg://帳號:密碼@主機:5432/資料庫` |
-| `ALLOWED_TABLES` | 範本已設定三張 AQI 資料表，完整設定見下方；多表以逗號分隔。未設定時程式預設只開放 `public.air_quality_hourly` |
+| `ALLOWED_TABLES` | 必填；範本已設定三張 AQI 資料表，完整設定見下方；多表以逗號分隔 |
 | `STATEMENT_TIMEOUT_MS` | 預設 5000；允許 1～60000 毫秒 |
 | `MAX_RESULT_ROWS` | 預設 100；允許 1～1000 筆 |
 
@@ -154,6 +154,23 @@ ALTER ROLE text2sql_reader SET search_path = pg_catalog;
 ```
 
 若 `text2sql_reader` 已建立，且原本的唯讀權限設定已完成，只需執行上述三張表的 `GRANT SELECT` 區塊，不必重跑 `CREATE ROLE`。更改 `.env` 後重新啟動應用，以重新載入三張表的 Schema。
+
+若 `public` 是專供此應用查詢、且不包含敏感資料表的 Schema，也可以把上方逐表列出的 `GRANT SELECT ON TABLE ...` 改成以下語法，一次授權目前已存在的所有資料表：
+
+```sql
+GRANT SELECT ON ALL TABLES IN SCHEMA public
+TO text2sql_reader;
+```
+
+`GRANT ... ON ALL TABLES IN SCHEMA` 只作用於執行當下已存在的資料表，不會自動套用到未來新建的資料表。若要讓未來由指定物件建立者建立的新表自動取得 SELECT，可另外設定：
+
+```sql
+-- data_owner 必須換成實際建立資料表的角色；每個建立者各設定一次。
+ALTER DEFAULT PRIVILEGES FOR ROLE data_owner IN SCHEMA public
+    GRANT SELECT ON TABLES TO text2sql_reader;
+```
+
+資料庫授權不會擴大應用程式的查詢白名單；需要查詢的新表仍須加入 `.env` 的 `ALLOWED_TABLES`，並重新啟動應用。若 Schema 內可能出現不應暴露給 Text-to-SQL 的資料表，應保留逐表授權，不要使用上述整個 Schema 的授權方式。
 
 對每個白名單 Schema／資料表重複必要的 USAGE／SELECT 授權。唯讀帳號不可擁有資料庫、Schema 或資料表，不授予其他角色成員資格，也不可授予 `pg_read_server_files`、`pg_write_server_files`、`pg_execute_server_program` 等能力。若使用已存在的帳號，還需要檢查並移除既有直接授權、角色成員資格與其他 Schema 的權限；上述建立新角色的範例不會清理舊帳號。
 
