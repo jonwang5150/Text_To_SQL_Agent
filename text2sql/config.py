@@ -16,10 +16,11 @@ class Settings:
     model: str
     database_url: str = field(repr=False)
     allowed_tables: tuple[str, ...]
-    ollama_base_url: str = "http://localhost:11434"
+    ollama_base_url: str = "https://ollama.com"
     llm_timeout_seconds: int = 120
     statement_timeout_ms: int = 5000
     max_result_rows: int = 100
+    ollama_api_key: str | None = field(default=None, repr=False)
 
 
 def load_settings() -> Settings:
@@ -44,7 +45,7 @@ def load_settings() -> Settings:
             raise ValueError
     except Exception:
         raise ValueError("DATABASE_URL 必須使用 postgresql+psycopg://。") from None
-    ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").strip().rstrip("/")
+    ollama_url = os.getenv("OLLAMA_BASE_URL", "https://ollama.com").strip().rstrip("/")
     try:
         parsed = urlsplit(ollama_url)
         if (parsed.scheme not in {"http", "https"} or not parsed.hostname
@@ -53,6 +54,12 @@ def load_settings() -> Settings:
             raise ValueError
     except ValueError:
         raise ValueError("OLLAMA_BASE_URL 須為 http(s)://主機:連接埠，不含 /api、帳密或參數。") from None
+    api_key = os.getenv("OLLAMA_API_KEY", "").strip() or None
+    if parsed.hostname == "ollama.com":
+        if parsed.scheme != "https":
+            raise ValueError("Ollama Cloud 的 OLLAMA_BASE_URL 必須使用 https://ollama.com。")
+        if not api_key:
+            raise ValueError("缺少環境變數：OLLAMA_API_KEY；直接連線 Ollama Cloud 需要 API Key。")
     try:
         timeout = int(os.getenv("STATEMENT_TIMEOUT_MS", "5000"))
         rows = int(os.getenv("MAX_RESULT_ROWS", "100"))
@@ -67,6 +74,7 @@ def load_settings() -> Settings:
         model=os.environ["LLM_MODEL"].strip(),
         database_url=os.environ["DATABASE_URL"].strip(),
         ollama_base_url=ollama_url,
+        ollama_api_key=api_key,
         llm_timeout_seconds=llm_timeout,
         allowed_tables=tables,
         statement_timeout_ms=timeout,
@@ -75,8 +83,11 @@ def load_settings() -> Settings:
 
 
 def create_llm(settings: Settings) -> ChatOllama:
-    """Use one Ollama endpoint; cloud models use the local Ollama sign-in."""
+    """Connect directly to Ollama Cloud with bearer authentication."""
+    client_kwargs = {"timeout": settings.llm_timeout_seconds}
+    if settings.ollama_api_key:
+        client_kwargs["headers"] = {"Authorization": f"Bearer {settings.ollama_api_key}"}
     return ChatOllama(
         model=settings.model, base_url=settings.ollama_base_url,
-        temperature=0, client_kwargs={"timeout": settings.llm_timeout_seconds},
+        temperature=0, client_kwargs=client_kwargs,
     )

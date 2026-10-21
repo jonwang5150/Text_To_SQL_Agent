@@ -68,8 +68,9 @@ macOS／Linux 使用 `python3 -m venv .venv`、`.venv/bin/python -m pip install 
 
 | 變數 | 說明 |
 |---|---|
-| `LLM_MODEL` | 必填；Ollama 完整模型標籤，例如 `gpt-oss:120b-cloud` 或 `nemotron-3-super:cloud` |
-| `OLLAMA_BASE_URL` | 預設 `http://localhost:11434`；Ollama 服務網址，不加 `/api` |
+| `LLM_MODEL` | 必填；雲端 API 的模型名稱，例如 `gpt-oss:120b` 或 `nemotron-3-super`，以 `https://ollama.com/api/tags` 回傳為準 |
+| `OLLAMA_BASE_URL` | 預設 `https://ollama.com`；直接連線 Ollama Cloud，不加 `/api` 或 `/v1` |
+| `OLLAMA_API_KEY` | 直接連線 Ollama Cloud 時必填；在 [Ollama API Keys](https://ollama.com/settings/keys) 建立 |
 | `LLM_TIMEOUT_SECONDS` | 預設 120；允許 1～600 秒，作為 Ollama HTTP 連線／讀取等操作的逾時 |
 | `DATABASE_URL` | 必填；`postgresql+psycopg://帳號:密碼@主機:5432/資料庫` |
 | `ALLOWED_TABLES` | 必填；範本已設定三張 AQI 資料表，完整設定見下方；多表以逗號分隔 |
@@ -78,38 +79,43 @@ macOS／Linux 使用 `python3 -m venv .venv`、`.venv/bin/python -m pip install 
 
 資料表設定只接受小寫的 `schema.table`，不接受系統 Schema 或需要引號的名稱。密碼包含 `@`、`:`、`/` 等字元時須 URL encode。現有環境變數優先於 `.env`；不要提交 `.env` 或輸出真實連線 URL。
 
-### Ollama 模型設定
+### Ollama Cloud 直接連線
 
-本專案呼叫本機 Ollama 服務，由 Ollama 處理模型執行或 Cloud 登入，不需要 `OPENAI_API_KEY`。先開啟 Ollama 桌面程式，讓服務持續執行；若使用 Cloud 模型，請在終端完成登入：
-
-```powershell
-ollama signin
-ollama list
-```
-
-`.env` 預設使用：
+本專案預設直接透過 HTTPS 呼叫 Ollama Cloud，使用 `OLLAMA_API_KEY` 作為 Bearer 驗證，不需要安裝或啟動本機 Ollama，也不需要執行 `ollama signin` 或設定 `OPENAI_API_KEY`。先在 [Ollama API Keys](https://ollama.com/settings/keys) 建立金鑰，再編輯 `.env`：
 
 ```dotenv
-LLM_MODEL=gpt-oss:120b-cloud
-OLLAMA_BASE_URL=http://localhost:11434
+LLM_MODEL=gpt-oss:120b
+OLLAMA_BASE_URL=https://ollama.com
+OLLAMA_API_KEY=填入你的_Ollama_API_Key
 LLM_TIMEOUT_SECONDS=120
 ```
 
 切換 Nemotron 只需將模型那行改為下列完整標籤，再重新啟動應用：
 
 ```dotenv
-LLM_MODEL=nemotron-3-super:cloud
+LLM_MODEL=nemotron-3-super
 ```
 
-也可填入 `ollama list` 中已下載且支援文字聊天的本機模型標籤。本機模型需先準備好權重；`:cloud` 模型在 Ollama 雲端執行，受帳號權限及額度限制，不代表將大型模型權重下載到本機。這裡採用本機服務轉接，不是直接呼叫 `https://ollama.com` 的 API Key 模式。
+直接連線時請使用雲端 API 回傳的模型名稱；本機 CLI 的 `gpt-oss:120b-cloud` 與 `nemotron-3-super:cloud` 分別改為 `gpt-oss:120b` 與 `nemotron-3-super`。可用模型與帳號額度以 Ollama 官方服務為準。API Key 留在 `.env` 或環境變數中，不要寫入程式或提交到 Git。
 
-可先在終端測試模型是否可用：
+可先列出雲端 API 可用模型，此指令不需要 API Key：
 
 ```powershell
-ollama run gpt-oss:120b-cloud "只回答 OK"
+Invoke-RestMethod https://ollama.com/api/tags | Select-Object -ExpandProperty models | Select-Object name
 ```
 
-應用只讀取模型最終 `content` 作為 SQL，不把 Ollama 獨立的 `thinking` 欄位當成 SQL；模型若輸出 Markdown 或其他非 SQL 內容，仍須經原本的驗證與修正流程。`LLM_TIMEOUT_SECONDS` 是 HTTP 操作逾時，不是整個 Graph 的總時間上限；慢速本機模型可適度增加此值。
+填好 `.env` 後，可在 `text2sql` 目錄用 Python 執行以下最小連線測試；只傳送固定提示詞，會使用帳號額度：
+
+```python
+from config import load_settings, create_llm
+
+llm = create_llm(load_settings())
+print(llm.invoke("只回答 OK").content)
+```
+
+若仍需本機模型，可將 `OLLAMA_BASE_URL` 改為 `http://localhost:11434`、`LLM_MODEL` 改為已下載的模型標籤，並清空 `OLLAMA_API_KEY`；此時須自行啟動本機 Ollama。雲端連線缺少 Key 時，應用會在初始化時明確提示。
+
+應用只讀取模型最終 `content` 作為 SQL，不把 Ollama 獨立的 `thinking` 欄位當成 SQL；模型若輸出 Markdown 或其他非 SQL 內容，仍須經原本的驗證與修正流程。`LLM_TIMEOUT_SECONDS` 是 HTTP 操作逾時，不是整個 Graph 的總時間上限。
 
 目前 `.env.example` 的查詢白名單如下，假設資料表位於 `public` Schema：
 
@@ -229,7 +235,7 @@ SQL Parser **不是安全沙箱**，PostgreSQL 唯讀交易也無法阻止所有
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-測試使用真正的 StateGraph 與 Validator，搭配 Mock LLM／Database，不需要 `.env`、執行中的 Ollama、網路或 PostgreSQL。涵蓋成功、驗證／執行錯誤修正、三次停止、第三次修正成功、空結果、連線／權限錯誤、LLM 失敗、CTE／函式安全驗證、結果上限、Schema、設定與 Gradio callback。Ollama 原生回應另外以 Mock HTTP transport 驗證，確認最終 SQL 不包含獨立推理欄位。
+測試使用真正的 StateGraph 與 Validator，搭配 Mock LLM／Database，不需要 `.env`、真實 API Key、執行中的 Ollama、網路或 PostgreSQL。涵蓋成功、驗證／執行錯誤修正、三次停止、第三次修正成功、空結果、連線／權限錯誤、LLM 失敗、CTE／函式安全驗證、結果上限、Schema、設定與 Gradio callback。Ollama 原生回應另外以 Mock HTTP transport 驗證雲端網址、Bearer 驗證、逾時與本機無 Key 連線，確認最終 SQL 不包含獨立推理欄位；401 驗證失敗不執行 SQL，也不顯示 API Key。
 
 Mock 測試只確認唯讀與逾時設定有送出，不能證明 PostgreSQL 真正執行效果；需在實際資料庫另外驗證角色、權限、逾時、驅動串流與查詢結果。
 
@@ -243,7 +249,7 @@ Mock 測試只確認唯讀與逾時設定有送出，不能證明 PostgreSQL 真
 .\.venv\Scripts\python.exe -m pytest -v tests/test_workflow.py -k "syntax_error_repaired or database_sql_error_repaired or third_repair_can_succeed or stops_after_exactly_three_repairs"
 ```
 
-要在真實資料庫人工驗證，可在專案目錄開啟 Python，貼上下列內容。只將首次輸出替換為必定錯誤的欄位，後續修正仍呼叫 `.env` 設定的真實 Ollama 模型；需先啟動服務並確認模型可用。Cloud 模型需要登入，會使用 Ollama 帳號額度。
+要在真實資料庫人工驗證，可在專案目錄開啟 Python，貼上下列內容。只將首次輸出替換為必定錯誤的欄位，後續修正仍呼叫 `.env` 設定的真實 Ollama 模型；需先設定有效的 `OLLAMA_API_KEY` 並確認模型可用，會使用 Ollama 帳號額度。
 
 ```python
 from unittest.mock import Mock
@@ -296,13 +302,14 @@ engine.dispose()
 - SQL 執行成功不代表問題解讀正確；仍需審閱日期、分組、NULL 與 JOIN 的語意。無法由 Schema 自動推知業務單位。
 - 筆數上限不限制每格資料大小；聚合或 JOIN 仍可能昂貴，主要依 statement timeout 保護。三次修正也可能累積多次資料庫與 LLM 等待時間。
 - 沒有多模型、RAG、登入、長期記憶、圖表或背景工作。Gradio 的間接套件包含其內部 Web 服務依賴，本專案不另建 API 服務。
-- 已驗證離線 pytest、UI 建構與 callback，以及透過本機 Ollama 分別呼叫 `gpt-oss:120b-cloud`、`nemotron-3-super:cloud` 產生並驗證 `SELECT 1` 的最小連線測試。這兩次模型測試沒有傳送資料庫內容。PostgreSQL 帳號可連線，但目前 Schema 啟動檢查因 `PUBLIC` 的 TEMPORARY 授權而失敗；完整三表查詢、唯讀交易實際阻擋效果與逾時效果仍需另外驗證。
+- 先前版本曾透過本機 Ollama 呼叫雲端模型完成最小連線測試；這不代表目前的雲端 API Key 直連已完成實測。目前直連以離線 Mock HTTP 測試驗證，實際雲端連線仍需設定有效 Key 後確認。PostgreSQL 帳號先前可連線，但 Schema 啟動檢查因 `PUBLIC` 的 TEMPORARY 授權而失敗；完整三表查詢、唯讀交易實際阻擋效果與逾時效果仍需另外驗證。
 
 ## 官方參考
 
 - [LangGraph Graph API](https://docs.langchain.com/oss/python/langgraph/graph-api)
 - [LangChain ChatOllama](https://docs.langchain.com/oss/python/integrations/chat/ollama)
-- [Ollama Cloud 與登入方式](https://docs.ollama.com/cloud)
+- [Ollama Cloud](https://docs.ollama.com/cloud)
+- [Ollama API 驗證](https://docs.ollama.com/api/authentication)
 - [Ollama GPT-OSS 模型標籤](https://ollama.com/library/gpt-oss)
 - [Ollama Nemotron 3 Super 模型標籤](https://ollama.com/library/nemotron-3-super)
 - [SQLGlot 文件](https://sqlglot.com/sqlglot.html)

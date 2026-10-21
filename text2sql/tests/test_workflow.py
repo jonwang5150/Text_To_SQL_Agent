@@ -314,34 +314,68 @@ def test_settings_reject_invalid_whitelist(monkeypatch, value):
 
 def test_settings_repr_hides_secrets():
     assert "postgresql" not in repr(settings())
+    assert "secret-test-key" not in repr(Settings(
+        "gpt-oss:120b", "postgresql+psycopg://fake", TABLES,
+        ollama_api_key="secret-test-key",
+    ))
 
 
 @pytest.fixture
 def ollama_settings_env(monkeypatch):
     monkeypatch.setattr(config, "load_dotenv", lambda path: None)
-    for key in ("OPENAI_API_KEY", "OLLAMA_BASE_URL", "LLM_TIMEOUT_SECONDS",
+    for key in ("OPENAI_API_KEY", "OLLAMA_API_KEY", "OLLAMA_BASE_URL", "LLM_TIMEOUT_SECONDS",
                 "STATEMENT_TIMEOUT_MS", "MAX_RESULT_ROWS", "ALLOWED_TABLES"):
         monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("LLM_MODEL", "gpt-oss:120b-cloud")
+    monkeypatch.setenv("LLM_MODEL", "gpt-oss:120b")
+    monkeypatch.setenv("OLLAMA_API_KEY", "test-cloud-key")
     monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://fake")
     monkeypatch.setenv("ALLOWED_TABLES", "public.air_quality_hourly")
 
 
 def test_ollama_settings_do_not_require_openai_key(ollama_settings_env):
     loaded = config.load_settings()
-    assert loaded.model == "gpt-oss:120b-cloud"
-    assert loaded.ollama_base_url == "http://localhost:11434"
+    assert loaded.model == "gpt-oss:120b"
+    assert loaded.ollama_base_url == "https://ollama.com"
+    assert loaded.ollama_api_key == "test-cloud-key"
     assert loaded.llm_timeout_seconds == 120
 
 
 def test_ollama_model_and_endpoint_can_be_changed(ollama_settings_env, monkeypatch):
-    monkeypatch.setenv("LLM_MODEL", "nemotron-3-super:cloud")
-    monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434/")
+    monkeypatch.setenv("LLM_MODEL", "nemotron-3-super")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "https://ollama.com/")
     monkeypatch.setenv("LLM_TIMEOUT_SECONDS", "240")
+    monkeypatch.setenv("OLLAMA_API_KEY", "  another-cloud-key  ")
     loaded = config.load_settings()
-    assert loaded.model == "nemotron-3-super:cloud"
-    assert loaded.ollama_base_url == "http://127.0.0.1:11434"
+    assert loaded.model == "nemotron-3-super"
+    assert loaded.ollama_base_url == "https://ollama.com"
+    assert loaded.ollama_api_key == "another-cloud-key"
     assert loaded.llm_timeout_seconds == 240
+
+
+@pytest.mark.parametrize("api_key", [None, "", "   "])
+def test_ollama_cloud_requires_key(ollama_settings_env, monkeypatch, api_key):
+    if api_key is None:
+        monkeypatch.delenv("OLLAMA_API_KEY")
+    else:
+        monkeypatch.setenv("OLLAMA_API_KEY", api_key)
+    with pytest.raises(ValueError, match="OLLAMA_API_KEY"):
+        config.load_settings()
+
+
+def test_ollama_cloud_requires_https(ollama_settings_env, monkeypatch):
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://ollama.com")
+    with pytest.raises(ValueError, match="https://ollama.com"):
+        config.load_settings()
+
+
+def test_local_ollama_can_still_be_used_without_key(ollama_settings_env, monkeypatch):
+    monkeypatch.delenv("OLLAMA_API_KEY")
+    monkeypatch.setenv("LLM_MODEL", "local-model")
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434/")
+    loaded = config.load_settings()
+    assert loaded.model == "local-model"
+    assert loaded.ollama_base_url == "http://127.0.0.1:11434"
+    assert loaded.ollama_api_key is None
 
 
 @pytest.mark.parametrize("endpoint", ["", "localhost:11434", "ftp://localhost:11434",
@@ -360,12 +394,21 @@ def test_ollama_rejects_invalid_timeout(ollama_settings_env, monkeypatch, timeou
         config.load_settings()
 
 
-def test_ollama_native_response_supplies_only_final_sql(monkeypatch):
+@pytest.mark.parametrize("endpoint, api_key", [
+    ("https://ollama.com", "test-cloud-key"),
+    ("http://localhost:11434", None),
+])
+def test_ollama_native_response_supplies_only_final_sql(monkeypatch, endpoint, api_key):
     requests = []
 
     def handler(request):
+        assert str(request.url) == endpoint + "/api/chat"
+        assert request.headers.get("Authorization") == (
+            f"Bearer {api_key}" if api_key else None
+        )
+        assert request.extensions["timeout"]["read"] == 240
         requests.append(json.loads(request.content))
-        body = {"model": "gpt-oss:120b-cloud", "done": True,
+        body = {"model": "gpt-oss:120b", "done": True,
                 "message": {"role": "assistant", "content": GOOD_SQL,
                             "thinking": "Reasoning must not become SQL"}}
         return httpx.Response(200, content=json.dumps(body) + "\n",
@@ -376,16 +419,39 @@ def test_ollama_native_response_supplies_only_final_sql(monkeypatch):
         **kwargs, "client_kwargs": {**kwargs["client_kwargs"],
                                     "transport": httpx.MockTransport(handler)}}))
     llm = config.create_llm(Settings(
-        "gpt-oss:120b-cloud", "postgresql+psycopg://fake", TABLES
+        "gpt-oss:120b", "postgresql+psycopg://fake", TABLES,
+        ollama_base_url=endpoint, ollama_api_key=api_key, llm_timeout_seconds=240,
     ))
     execute = Mock(return_value=RESULT)
     workflow = build_graph(llm, SCHEMA, TABLES, execute)
     state = workflow.invoke(initial_state("查詢 AQI 最大值"))
     assert state["status"] == "success" and state["retry_count"] == 0
     assert "Reasoning" not in state["sql_query"]
-    assert requests[0]["model"] == "gpt-oss:120b-cloud"
+    assert requests[0]["model"] == "gpt-oss:120b"
     assert requests[0]["messages"][0]["role"] == "system"
     execute.assert_called_once()
+
+
+def test_ollama_cloud_auth_failure_does_not_execute_or_leak_key(monkeypatch):
+    def handler(request):
+        assert request.headers["Authorization"] == "Bearer secret-test-key"
+        return httpx.Response(401, json={"error": "Invalid key: secret-test-key"})
+
+    real_chat = config.ChatOllama
+    monkeypatch.setattr(config, "ChatOllama", lambda **kwargs: real_chat(**{
+        **kwargs, "client_kwargs": {**kwargs["client_kwargs"],
+                                    "transport": httpx.MockTransport(handler)}}))
+    llm = config.create_llm(Settings(
+        "gpt-oss:120b", "postgresql+psycopg://fake", TABLES,
+        ollama_api_key="secret-test-key",
+    ))
+    execute = Mock()
+    state = build_graph(llm, SCHEMA, TABLES, execute).invoke(initial_state("AQI 最大值？"))
+    assert state["status"] == "failed" and state["error_kind"] == "llm"
+    assert state["retry_count"] == 0
+    assert "API Key" in state["error_message"]
+    assert "secret-test-key" not in str(state)
+    execute.assert_not_called()
 
 
 @pytest.mark.parametrize("code, kind", [("57014", "query"), ("42501", "permission"),

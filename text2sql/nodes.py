@@ -164,7 +164,7 @@ def make_nodes(
                     "error_message": None, "error_kind": None, "status": "running"}
         except Exception:
             # Provider exceptions may contain keys, URLs or request bodies.
-            return {"error_message": "Ollama 呼叫失敗，請檢查服務網址、模型名稱、登入狀態或逾時設定。",
+            return {"error_message": "Ollama 呼叫失敗，請檢查服務網址、模型名稱、API Key、帳號額度或逾時設定。",
                     "error_kind": "llm", "status": "failed"}
 
     def schema_loader(state: "AgentState") -> dict:
