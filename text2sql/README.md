@@ -39,6 +39,9 @@ Schema 在啟動時以唯讀交易讀取、檢查並快取，再交由 `schema_l
 ```text
 text2sql/
 ├── app.py                 # 啟動、Gradio UI 與流程呼叫
+├── ui.py                  # 工作台主題、頁首與資料範圍元件
+├── ui.css                 # 響應式版面與介面樣式
+├── ui.js                  # 資料表名稱複製與提示
 ├── graph.py               # TypedDict State、Nodes 與 Conditional Edges
 ├── nodes.py               # 六個 Node、提示詞、AST 驗證與回答
 ├── database.py            # Schema、帳號檢查、唯讀交易與 SQL 執行
@@ -123,7 +126,15 @@ print(llm.invoke("只回答 OK").content)
 ALLOWED_TABLES=public.air_quality_hourly,public.air_quality_predictions,public.air_quality_predictions_8h
 ```
 
-`langchain_pg_collection` 與 `langchain_pg_embedding` 先不加入白名單，也不在下方授予 SELECT。此 MVP 查詢 AQI 歷史與預測資料，不需要讀取這兩張 pgvector 相關表。三張 AQI 表的實際欄位與型別仍由啟動時讀取，不假設預測欄位或 JOIN 關係。
+`langchain_pg_collection` 與 `langchain_pg_embedding` 先不加入白名單，也不在下方授予 SELECT。AQI 歷史與預測資料只是範例，查詢器也能使用其他符合唯讀要求的資料表；實際欄位與型別由啟動時讀取。
+
+### 學生與教師示範資料
+
+本機另有兩張虛構測試資料表：`public.students`（8 位學生）與 `public.teachers`（4 位老師）。學生包含 `student_name`、`age`、`grade_level`、`score` 與 `teacher_id`；老師包含 `teacher_name`、`subject`、`years_experience` 與 `hire_date`。兩表可透過 `teacher_id` 關聯。
+
+本機 `.env` 已將這兩張表加入 `ALLOWED_TABLES`，應用帳號只取得 SELECT 權限；重新啟動應用後即可使用。可測試「請依年級統計 students 的平均成績」、「請列出成績最高的前三位學生」或「請列出每位學生及其老師姓名和授課科目」。
+
+建表與資料腳本保存在 `sql/seed_school_demo.sql`，不含管理員密碼。若需在另一個資料庫重建，請由管理員在單一交易中執行；腳本假設 `text2sql_reader` 角色已存在，遇到同名資料表會停止。這是獨立的示範資料準備腳本，不會隨應用啟動自動執行。
 
 直接相依版本已固定，間接相依仍由 pip resolver 決定。實際驗證環境為 Windows、Python 3.12.7；Python 3.11 尚未執行驗證。
 
@@ -225,7 +236,9 @@ SQL Parser **不是安全沙箱**，PostgreSQL 唯讀交易也無法阻止所有
 .\.venv\Scripts\python.exe app.py
 ```
 
-瀏覽 `http://127.0.0.1:7860`（若連接埠被占用，以終端顯示的 URL 為準）。介面包含中文問題、送出按鈕、中文回答、最新 SQL、執行結果與修正次數。只綁定本機，不啟用 Gradio 公開分享。
+瀏覽 `http://127.0.0.1:7860`（若連接埠被占用，以終端顯示的 URL 為準）。介面採用通用的資料查詢工作台，包含問題輸入、三個可點選範例、查詢結果／SQL 分頁、執行狀態與修正次數；側欄以精簡清單顯示實際設定的資料表，可依資料表或 Schema 名稱搜尋，過長時在框內捲動。主要內文與輸入採用較大的字級；窄螢幕會切換為單欄，並支援淺色／深色外觀。只綁定本機，不啟用 Gradio 公開分享。
+
+介面仍使用 Gradio，不需要另外安裝 Node.js 或啟動前端服務。主題與靜態元件集中在 `ui.py`，樣式集中在 `ui.css`；啟動時載入 `APP_THEME` 與 `APP_CSS`，修改後重新啟動即可生效。若從其他 Python 程式呼叫 `create_app()`，請在 `.launch()` 同樣傳入 `theme=APP_THEME, css=APP_CSS`。
 
 沒有資料時正常回報「查無符合條件的資料」。`COUNT(*)` 的零筆計數會顯示數值 0。日期、Decimal 與 NULL 由 Python 格式化，不推測單位或改寫數字。
 
