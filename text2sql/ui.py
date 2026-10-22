@@ -57,6 +57,7 @@ COPY_ICON = (
 )
 
 
+# 產生頁首，顯示應用名稱與服務就緒狀態。
 def header_html(ready: bool) -> str:
     state_class, state_label = ("ready", "可開始查詢") if ready else ("pending", "待完成設定")
     return f"""
@@ -71,6 +72,7 @@ def header_html(ready: bool) -> str:
     """
 
 
+# 產生工作台簡介，呈現可查詢資料表數量與結果筆數上限。
 def hero_html(table_count: int, max_rows: int) -> str:
     return f"""
     <section class="workspace-hero" aria-labelledby="workspace-title">
@@ -87,6 +89,7 @@ def hero_html(table_count: int, max_rows: int) -> str:
     """
 
 
+# 產生共用區塊標題，並跳脫文字以安全嵌入 HTML。
 def section_html(number: str, title: str, description: str) -> str:
     return (
         '<div class="section-heading">'
@@ -95,6 +98,7 @@ def section_html(number: str, title: str, description: str) -> str:
     )
 
 
+# 產生資料範圍側欄標題與已設定資料表數量。
 def scope_header_html(table_count: int) -> str:
     return (
         '<div class="scope-heading"><h2 id="scope-title">資料範圍</h2>'
@@ -103,6 +107,7 @@ def scope_header_html(table_count: int) -> str:
     )
 
 
+# 依關鍵字篩選已設定的資料表，產生附複製按鈕的清單。
 def tables_html(tables: tuple[str, ...], search: str = "") -> str:
     """Filter configured table names without fetching schema or database data."""
     query = search.strip().casefold()

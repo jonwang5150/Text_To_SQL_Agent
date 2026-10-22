@@ -54,6 +54,7 @@ SQL 只用來查詢，不能捏造結果。資訊不足時採用 Schema 支援�
 """.strip()
 
 
+# 檢查 SQL 結構與資料表白名單，補上筆數上限並輸出正規化 SQL。
 def validate_sql(sql: str, allowed_tables: tuple[str, ...], max_rows: int) -> str:
     """Return normalized, bounded SQL; this parser is one protection, not a sandbox."""
     if not sql.strip() or len(sql) > 20000:
@@ -122,10 +123,12 @@ def validate_sql(sql: str, allowed_tables: tuple[str, ...], max_rows: int) -> st
         raise ValueError("SQL 無法以支援的 PostgreSQL 語法解析，請重新產生。") from None
 
 
+# 將實際查詢結果轉為文字，保留原始值並提示資料是否截斷。
 def format_answer(result: QueryResult) -> str:
     if not result["rows"]:
         return "查無符合條件的資料。"
 
+    # 統一空值與日期的顯示格式，保留其他數值的文字表示。
     def display(value: object) -> str:
         if value is None:
             return "NULL"
@@ -143,12 +146,14 @@ def format_answer(result: QueryResult) -> str:
     return "\n".join(lines)
 
 
+# 注入模型、Schema 與執行器，建立查詢流程所需的六個節點。
 def make_nodes(
     llm: BaseChatModel, cached_schema: str, allowed_tables: tuple[str, ...],
     execute: Callable[[str], QueryResult], max_rows: int,
     startup_error: str | None,
 ) -> dict[str, Callable]:
     """Inject just the dependencies needed by the six plain node functions."""
+    # 呼叫模型產生或修正 SQL，並將服務例外轉為安全的錯誤訊息。
     def call_llm(state: "AgentState", repair: bool) -> dict:
         payload = {"question": state["question"], "schema": state["schema"]}
         if repair:
@@ -167,6 +172,7 @@ def make_nodes(
             return {"error_message": "Ollama 呼叫失敗，請檢查服務網址、模型名稱、API Key、帳號額度或逾時設定。",
                     "error_kind": "llm", "status": "failed"}
 
+    # 載入快取 Schema，並攔截空白問題或初始化失敗。
     def schema_loader(state: "AgentState") -> dict:
         error = startup_error or (None if cached_schema else "Schema 尚未成功載入，請重新啟動。")
         if not state["question"]:
@@ -174,9 +180,11 @@ def make_nodes(
         return {"schema": cached_schema, "error_message": error,
                 "error_kind": "initialization" if error else None}
 
+    # 根據問題與 Schema 請模型產生第一版 SQL。
     def sql_generator(state: "AgentState") -> dict:
         return call_llm(state, repair=False)
 
+    # 驗證並正規化模型產生的 SQL，記錄可供修正的錯誤。
     def sql_validator(state: "AgentState") -> dict:
         try:
             sql = validate_sql(state["sql_query"], allowed_tables, max_rows)
@@ -185,6 +193,7 @@ def make_nodes(
         except (ValueError, SqlglotError) as exc:
             return {"error_message": str(exc), "error_kind": "validation", "query_result": None}
 
+    # 執行已驗證的 SQL，將結果或資料庫錯誤寫回流程狀態。
     def sql_executor(state: "AgentState") -> dict:
         try:
             result = execute(state["sql_query"])
@@ -192,11 +201,13 @@ def make_nodes(
         except DatabaseError as exc:
             return {"query_result": None, "error_message": str(exc), "error_kind": exc.kind}
 
+    # 將失敗 SQL 與錯誤交給模型修正，並累計修正次數。
     def sql_repair(state: "AgentState") -> dict:
         update = call_llm(state, repair=True)
         return {**update, "retry_count": state["retry_count"] + 1,
                 "status": "failed" if update["error_message"] else "repairing"}
 
+    # 依流程狀態產生查詢答案或包含修正次數的失敗說明。
     def answer_generator(state: "AgentState") -> dict:
         if state["error_message"]:
             return {"status": "failed", "final_answer":

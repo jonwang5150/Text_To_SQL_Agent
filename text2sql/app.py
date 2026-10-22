@@ -14,6 +14,7 @@ from ui import (APP_CSS, APP_THEME, TABLE_COPY_JS, header_html, hero_html,
                 scope_header_html, section_html, tables_html)
 
 
+# 初始化查詢服務並建立 Gradio 操作介面。
 def create_app() -> gr.Blocks:
     settings = None
     engine = None
@@ -32,6 +33,7 @@ def create_app() -> gr.Blocks:
     except Exception:
         startup_error = "初始化失敗，請檢查環境變數、套件與資料庫設定。"
 
+    # 執行問題查詢，回傳答案、SQL 與修正狀態供介面顯示。
     def submit(question: str) -> tuple[str, str, str]:
         if workflow is None:
             return f"啟動失敗：{startup_error}", "", "失敗｜修正 0 次"

@@ -8,6 +8,7 @@ from langgraph.graph import END, START, StateGraph
 from database import QueryResult
 
 
+# 定義各流程節點共用的問題、SQL、結果與錯誤狀態。
 class AgentState(TypedDict):
     question: str
     schema: str
@@ -24,6 +25,7 @@ MAX_REPAIRS = 3
 GRAPH_RECURSION_LIMIT = 32
 
 
+# 為每次提問建立獨立狀態，避免沿用先前結果或修正次數。
 def initial_state(question: str) -> AgentState:
     return {
         "question": question.strip(), "schema": "", "sql_query": "",
@@ -32,6 +34,7 @@ def initial_state(question: str) -> AgentState:
     }
 
 
+# 組裝查詢節點與分支路徑，限制 SQL 自動修正次數。
 def build_graph(
     llm: BaseChatModel, cached_schema: str, allowed_tables: tuple[str, ...],
     execute: Callable[[str], QueryResult], max_result_rows: int = 100,
@@ -46,12 +49,15 @@ def build_graph(
     for name, node in nodes.items():
         graph.add_node(name, node)
 
+    # Schema 載入成功後產生 SQL，失敗則直接整理錯誤回覆。
     def after_schema(state: AgentState) -> str:
         return "answer_generator" if state["error_message"] else "sql_generator"
 
+    # 模型成功回傳 SQL 後進行驗證，失敗則結束查詢。
     def after_generation(state: AgentState) -> str:
         return "answer_generator" if state["error_message"] else "sql_validator"
 
+    # 依驗證或執行結果，決定執行 SQL、嘗試修正或產生回覆。
     def after_attempt(state: AgentState) -> str:
         if not state["error_message"]:
             return "answer_generator" if state["query_result"] is not None else "sql_executor"

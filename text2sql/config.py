@@ -11,6 +11,7 @@ from langchain_ollama import ChatOllama
 from sqlalchemy.engine import make_url
 
 
+# 集中保存不可變的模型、資料庫與查詢限制設定。
 @dataclass(frozen=True)
 class Settings:
     model: str
@@ -23,6 +24,7 @@ class Settings:
     ollama_api_key: str | None = field(default=None, repr=False)
 
 
+# 載入並驗證環境設定，避免以無效或不安全的參數啟動。
 def load_settings() -> Settings:
     load_dotenv(Path(__file__).with_name(".env"))
     required = ("LLM_MODEL", "DATABASE_URL", "ALLOWED_TABLES")
@@ -82,6 +84,7 @@ def load_settings() -> Settings:
     )
 
 
+# 依設定建立 Ollama 模型用戶端，套用驗證資訊與逾時限制。
 def create_llm(settings: Settings) -> ChatOllama:
     """Connect directly to Ollama Cloud with bearer authentication."""
     client_kwargs = {"timeout": settings.llm_timeout_seconds}

@@ -27,6 +27,7 @@ GOOD_SQL = "SELECT MAX(aqi) AS max_aqi FROM public.air_quality_hourly"
 RESULT = {"columns": ["max_aqi"], "rows": [(123,)], "truncated": False}
 
 
+# 以模擬模型與執行器跑完整流程，供測試檢查狀態與呼叫次數。
 def run_workflow(responses, results=None, *, startup_error=None, question="哪一天 AQI 最大？"):
     llm = Mock()
     llm.invoke.side_effect = [
@@ -40,6 +41,7 @@ def run_workflow(responses, results=None, *, startup_error=None, question="哪�
     return state, llm, execute
 
 
+# 確認正常查詢會回傳結果、補上筆數上限且不需修正。
 def test_success():
     state, llm, execute = run_workflow([GOOD_SQL])
     assert state["status"] == "success"
@@ -50,6 +52,7 @@ def test_success():
     assert "LIMIT 101" in state["sql_query"]
 
 
+# 確認語法錯誤先交由模型修正，通過驗證後才執行。
 def test_syntax_error_repaired_before_execution():
     state, llm, execute = run_workflow(["SELECT (", GOOD_SQL])
     assert state["status"] == "success"
@@ -60,6 +63,7 @@ def test_syntax_error_repaired_before_execution():
     assert '"error":' in repair_payload and '"schema":' in repair_payload
 
 
+# 確認資料庫回報的 SQL 錯誤會帶入修正提示並成功重試。
 @pytest.mark.parametrize("message", ["PostgreSQL 42601：SQL 語法錯誤", "PostgreSQL 42703：欄位不存在"])
 def test_database_sql_error_repaired(message):
     bad = "SELECT missing_column FROM public.air_quality_hourly"
@@ -70,6 +74,7 @@ def test_database_sql_error_repaired(message):
     assert message in llm.invoke.call_args_list[1].args[0][1][1]
 
 
+# 確認 SQL 持續驗證失敗時，修正三次便停止且不執行查詢。
 def test_validation_stops_after_exactly_three_repairs():
     state, llm, execute = run_workflow(["DELETE FROM public.air_quality_hourly"] * 4)
     assert state["status"] == "failed" and state["retry_count"] == 3
@@ -79,6 +84,7 @@ def test_validation_stops_after_exactly_three_repairs():
     assert state["error_message"]
 
 
+# 確認 SQL 持續執行失敗時，修正三次便停止。
 def test_execution_stops_after_exactly_three_repairs():
     state, llm, execute = run_workflow([GOOD_SQL] * 4,
         [DatabaseError("SQL 執行失敗", "query") for _ in range(4)])
@@ -86,12 +92,14 @@ def test_execution_stops_after_exactly_three_repairs():
     assert llm.invoke.call_count == execute.call_count == 4
 
 
+# 確認第三次修正仍有機會成功執行查詢。
 def test_third_repair_can_succeed():
     state, llm, execute = run_workflow(["SELECT ("] * 3 + [GOOD_SQL])
     assert state["status"] == "success" and state["retry_count"] == 3
     assert llm.invoke.call_count == 4 and execute.call_count == 1
 
 
+# 確認查無資料仍視為成功，並回傳明確提示。
 def test_empty_result_is_success():
     state, _, _ = run_workflow([GOOD_SQL], [{"columns": ["aqi"], "rows": [], "truncated": False}])
     assert state["status"] == "success"
@@ -99,6 +107,7 @@ def test_empty_result_is_success():
     assert state["retry_count"] == 0
 
 
+# 確認連線或權限等無法藉 SQL 修正的錯誤不會重試。
 @pytest.mark.parametrize("kind", ["connection", "permission", "database"])
 def test_unrepairable_database_failure(kind):
     state, llm, execute = run_workflow([GOOD_SQL], [DatabaseError("資料庫無法連線", kind)])
@@ -106,6 +115,7 @@ def test_unrepairable_database_failure(kind):
     assert llm.invoke.call_count == execute.call_count == 1
 
 
+# 確認 Schema 初始化失敗時，直接回報且不呼叫外部服務。
 def test_schema_startup_failure_does_not_call_llm_or_database():
     state, llm, execute = run_workflow([], startup_error="資料庫無法連線")
     assert state["status"] == "failed"
@@ -114,6 +124,7 @@ def test_schema_startup_failure_does_not_call_llm_or_database():
     execute.assert_not_called()
 
 
+# 確認空白問題會被攔截，不觸發模型或資料庫查詢。
 def test_blank_question():
     state, llm, execute = run_workflow([], question="   ")
     assert "請輸入" in state["final_answer"]
@@ -121,6 +132,7 @@ def test_blank_question():
     execute.assert_not_called()
 
 
+# 確認模型呼叫失敗時，不洩漏例外中的敏感資訊。
 def test_llm_failure_is_sanitized():
     state, llm, execute = run_workflow([RuntimeError("secret-api-key")])
     assert state["status"] == "failed" and state["retry_count"] == 0
@@ -129,6 +141,7 @@ def test_llm_failure_is_sanitized():
     execute.assert_not_called()
 
 
+# 確認修正期間模型失敗會結束流程，並保留修正次數。
 def test_llm_failure_during_repair():
     state, llm, execute = run_workflow(["SELECT (", RuntimeError("secret")])
     assert state["status"] == "failed" and state["retry_count"] == 1
@@ -136,6 +149,7 @@ def test_llm_failure_during_repair():
     execute.assert_not_called()
 
 
+# 確認危險或不支援的 SQL 語法會被驗證器拒絕。
 @pytest.mark.parametrize("sql", [
     "DELETE FROM public.air_quality_hourly",
     "UPDATE public.air_quality_hourly SET aqi = 0",
@@ -174,6 +188,7 @@ def test_reject_unsafe_or_unsupported_sql(sql):
         validate_sql(sql, TABLES, 100)
 
 
+# 確認支援的查詢語法可通過驗證並加入筆數上限。
 @pytest.mark.parametrize("sql", [
     GOOD_SQL,
     "SELECT aqi FROM air_quality_hourly WHERE aqi > 100 ORDER BY aqi DESC",
@@ -196,6 +211,7 @@ def test_accept_supported_sql(sql):
     assert parse_one(validated, read="postgres").args["limit"].expression.this == "101"
 
 
+# 確認筆數上限加在最外層，並保留使用者設定的較小限制。
 def test_limit_caps_only_outer_query_and_preserves_smaller_user_limit():
     sql = "SELECT AVG(aqi) FROM public.air_quality_hourly"
     tree = parse_one(validate_sql(sql, TABLES, 100), read="postgres")
@@ -204,18 +220,21 @@ def test_limit_caps_only_outer_query_and_preserves_smaller_user_limit():
     assert "LIMIT 101" in validate_sql(sql + " LIMIT 900", TABLES, 100)
 
 
+# 確認省略 Schema 的表名可唯一解析，名稱不明確時則拒絕。
 def test_unqualified_table_is_resolved_and_ambiguity_rejected():
     assert '"public".air_quality_hourly' in validate_sql("SELECT * FROM air_quality_hourly", TABLES, 10)
     with pytest.raises(ValueError):
         validate_sql("SELECT * FROM air_quality_hourly", TABLES + ("other.air_quality_hourly",), 10)
 
 
+# 確認引號與大小寫變化無法繞過資料表白名單。
 def test_quoted_identifiers_do_not_bypass_whitelist():
     with pytest.raises(ValueError):
         validate_sql('SELECT * FROM "PUBLIC".air_quality_hourly', TABLES, 10)
     assert "LIMIT" in validate_sql("SELECT * FROM PUBLIC.AIR_QUALITY_HOURLY", TABLES, 10)
 
 
+# 確認答案保留日期、數值精度與空值，並提示結果截斷。
 def test_answer_preserves_values_and_reports_truncation():
     answer = format_answer({"columns": ["日期", "AQI", "備註"],
         "rows": [(date(2025, 1, 1), Decimal("100.0100"), None)], "truncated": True})
@@ -224,6 +243,7 @@ def test_answer_preserves_values_and_reports_truncation():
     assert "0" in format_answer({"columns": ["筆數"], "rows": [(0,)], "truncated": False})
 
 
+# 確認交易套用唯讀、逾時限制與安全搜尋路徑。
 def test_readonly_transaction_sets_local_protections():
     engine = MagicMock()
     conn = engine.connect.return_value.__enter__.return_value
@@ -235,10 +255,12 @@ def test_readonly_transaction_sets_local_protections():
     assert [call.args[1] for call in conn.execute.call_args_list] == [{"v": "5000"}, {"v": "1000"}]
 
 
+# 以模擬連線取代資料庫存取，讓測試可離線執行。
 @pytest.fixture
 def mocked_connection(monkeypatch):
     conn = MagicMock()
 
+    # 提供可搭配 with 使用的模擬資料庫連線。
     @contextmanager
     def connection(*args):
         yield conn
@@ -247,12 +269,14 @@ def mocked_connection(monkeypatch):
     return conn
 
 
+# 建立測試用設定，將結果上限設為兩筆以驗證截斷行為。
 def settings():
     return Settings(
         "fake-model", "postgresql+psycopg://fake", TABLES, max_result_rows=2
     )
 
 
+# 確認執行器僅多取一筆來判斷截斷，回傳資料仍遵守上限。
 def test_executor_fetches_only_cap_plus_one(mocked_connection):
     result = mocked_connection.execution_options.return_value.exec_driver_sql.return_value.__enter__.return_value
     result.keys.return_value = ["aqi"]
@@ -263,6 +287,7 @@ def test_executor_fetches_only_cap_plus_one(mocked_connection):
     assert answer == {"columns": ["aqi"], "rows": [(1,), (2,)], "truncated": True}
 
 
+# 確認連線失敗會轉為統一錯誤，且不暴露連線密碼。
 def test_executor_captures_connection_failure(mocked_connection):
     mocked_connection.execution_options.side_effect = OperationalError(
         "SQL", {}, Exception("postgresql://user:secret@host"))
@@ -271,6 +296,7 @@ def test_executor_captures_connection_failure(mocked_connection):
     assert "secret" not in str(error.value)
 
 
+# 確認 Schema 來自實際欄位資訊，並檢查角色與資料表權限。
 def test_schema_reads_actual_columns_and_checks_role(mocked_connection):
     mocked_connection.execute.side_effect = [
         Mock(scalar_one=Mock(return_value=False)),
@@ -286,6 +312,7 @@ def test_schema_reads_actual_columns_and_checks_role(mocked_connection):
         "schema": "public", "table": "air_quality_hourly"}
 
 
+# 確認啟動時會拒絕權限過大的資料庫角色。
 def test_schema_rejects_powerful_role(mocked_connection):
     mocked_connection.execute.side_effect = [
         Mock(scalar_one=Mock(return_value=True)), Mock(scalar_one=Mock(return_value=False))]
@@ -293,6 +320,7 @@ def test_schema_rejects_powerful_role(mocked_connection):
         load_schema(Mock(), settings())
 
 
+# 確認 SQL 錯誤保留代碼與欄位資訊，同時隱藏敏感原文。
 def test_database_sql_error_keeps_code_without_raw_credentials():
     original = Exception("sensitive row value / password")
     original.sqlstate = "42703"
@@ -302,6 +330,7 @@ def test_database_sql_error_keeps_code_without_raw_credentials():
     assert "password" not in str(error) and "sensitive" not in str(error)
 
 
+# 確認設定會拒絕系統表、非法名稱與空白白名單。
 @pytest.mark.parametrize("value", ["pg_catalog.pg_authid", "public.x;DROP TABLE x", "public.MixedCase", ""])
 def test_settings_reject_invalid_whitelist(monkeypatch, value):
     monkeypatch.setattr(config, "load_dotenv", lambda path: None)
@@ -312,6 +341,7 @@ def test_settings_reject_invalid_whitelist(monkeypatch, value):
         config.load_settings()
 
 
+# 確認設定的文字表示不會包含資料庫網址或 API 金鑰。
 def test_settings_repr_hides_secrets():
     assert "postgresql" not in repr(settings())
     assert "secret-test-key" not in repr(Settings(
@@ -320,6 +350,7 @@ def test_settings_repr_hides_secrets():
     ))
 
 
+# 建立獨立的 Ollama 測試環境，避免本機設定影響結果。
 @pytest.fixture
 def ollama_settings_env(monkeypatch):
     monkeypatch.setattr(config, "load_dotenv", lambda path: None)
@@ -332,6 +363,7 @@ def ollama_settings_env(monkeypatch):
     monkeypatch.setenv("ALLOWED_TABLES", "public.air_quality_hourly")
 
 
+# 確認 Ollama Cloud 設定可載入，且不依賴 OpenAI 金鑰。
 def test_ollama_settings_do_not_require_openai_key(ollama_settings_env):
     loaded = config.load_settings()
     assert loaded.model == "gpt-oss:120b"
@@ -340,6 +372,7 @@ def test_ollama_settings_do_not_require_openai_key(ollama_settings_env):
     assert loaded.llm_timeout_seconds == 120
 
 
+# 確認模型、服務網址、金鑰與逾時設定可由環境變數調整。
 def test_ollama_model_and_endpoint_can_be_changed(ollama_settings_env, monkeypatch):
     monkeypatch.setenv("LLM_MODEL", "nemotron-3-super")
     monkeypatch.setenv("OLLAMA_BASE_URL", "https://ollama.com/")
@@ -352,6 +385,7 @@ def test_ollama_model_and_endpoint_can_be_changed(ollama_settings_env, monkeypat
     assert loaded.llm_timeout_seconds == 240
 
 
+# 確認 Ollama Cloud 會拒絕缺少或空白的 API 金鑰。
 @pytest.mark.parametrize("api_key", [None, "", "   "])
 def test_ollama_cloud_requires_key(ollama_settings_env, monkeypatch, api_key):
     if api_key is None:
@@ -362,12 +396,14 @@ def test_ollama_cloud_requires_key(ollama_settings_env, monkeypatch, api_key):
         config.load_settings()
 
 
+# 確認 Ollama Cloud 服務網址必須使用 HTTPS。
 def test_ollama_cloud_requires_https(ollama_settings_env, monkeypatch):
     monkeypatch.setenv("OLLAMA_BASE_URL", "http://ollama.com")
     with pytest.raises(ValueError, match="https://ollama.com"):
         config.load_settings()
 
 
+# 確認本機 Ollama 可在未設定 API 金鑰時使用。
 def test_local_ollama_can_still_be_used_without_key(ollama_settings_env, monkeypatch):
     monkeypatch.delenv("OLLAMA_API_KEY")
     monkeypatch.setenv("LLM_MODEL", "local-model")
@@ -378,6 +414,7 @@ def test_local_ollama_can_still_be_used_without_key(ollama_settings_env, monkeyp
     assert loaded.ollama_api_key is None
 
 
+# 確認格式錯誤或含有多餘資訊的服務網址會被拒絕。
 @pytest.mark.parametrize("endpoint", ["", "localhost:11434", "ftp://localhost:11434",
     "http://localhost:11434/api", "http://user:secret@localhost:11434",
     "http://localhost:11434?x=1", "http://localhost:invalid"])
@@ -387,6 +424,7 @@ def test_ollama_rejects_invalid_endpoint(ollama_settings_env, monkeypatch, endpo
         config.load_settings()
 
 
+# 確認模型逾時設定必須為允許範圍內的整數。
 @pytest.mark.parametrize("timeout", ["0", "601", "abc"])
 def test_ollama_rejects_invalid_timeout(ollama_settings_env, monkeypatch, timeout):
     monkeypatch.setenv("LLM_TIMEOUT_SECONDS", timeout)
@@ -394,6 +432,7 @@ def test_ollama_rejects_invalid_timeout(ollama_settings_env, monkeypatch, timeou
         config.load_settings()
 
 
+# 確認原生 API 使用正確驗證與逾時設定，且只將最終回答當作 SQL。
 @pytest.mark.parametrize("endpoint, api_key", [
     ("https://ollama.com", "test-cloud-key"),
     ("http://localhost:11434", None),
@@ -401,6 +440,7 @@ def test_ollama_rejects_invalid_timeout(ollama_settings_env, monkeypatch, timeou
 def test_ollama_native_response_supplies_only_final_sql(monkeypatch, endpoint, api_key):
     requests = []
 
+    # 模擬原生聊天回應，檢查請求設定並分離推理與最終 SQL。
     def handler(request):
         assert str(request.url) == endpoint + "/api/chat"
         assert request.headers.get("Authorization") == (
@@ -432,7 +472,9 @@ def test_ollama_native_response_supplies_only_final_sql(monkeypatch, endpoint, a
     execute.assert_called_once()
 
 
+# 確認雲端驗證失敗時不執行 SQL，且不洩漏金鑰。
 def test_ollama_cloud_auth_failure_does_not_execute_or_leak_key(monkeypatch):
+    # 模擬雲端驗證失敗，檢查錯誤處理是否隱藏金鑰。
     def handler(request):
         assert request.headers["Authorization"] == "Bearer secret-test-key"
         return httpx.Response(401, json={"error": "Invalid key: secret-test-key"})
@@ -454,6 +496,7 @@ def test_ollama_cloud_auth_failure_does_not_execute_or_leak_key(monkeypatch):
     execute.assert_not_called()
 
 
+# 確認 SQLSTATE 可正確區分查詢、權限與連線錯誤。
 @pytest.mark.parametrize("code, kind", [("57014", "query"), ("42501", "permission"),
                                        ("08006", "connection"), ("28P01", "connection")])
 def test_database_error_categories(code, kind):
@@ -462,6 +505,7 @@ def test_database_error_categories(code, kind):
     assert database_error(DBAPIError("SQL", {}, original)).kind == kind
 
 
+# 確認資料表缺少讀取權限或具有寫入、建立權限時會被拒絕。
 @pytest.mark.parametrize("rights", [
     {"can_read": False, "can_write": False, "can_create": False},
     {"can_read": True, "can_write": True, "can_create": False},
@@ -477,6 +521,7 @@ def test_schema_rejects_invalid_table_privileges(mocked_connection, rights):
         load_schema(Mock(), settings())
 
 
+# 確認每次提問使用獨立狀態，不沿用前次修正次數。
 def test_each_question_has_fresh_state():
     llm, execute = Mock(), Mock(return_value=RESULT)
     llm.invoke.side_effect = [AIMessage(content="SELECT ("), AIMessage(content=GOOD_SQL),
@@ -487,6 +532,7 @@ def test_each_question_has_fresh_state():
     assert first["retry_count"] == 1 and second["retry_count"] == 0
 
 
+# 確認模擬依賴下可建立介面，並透過送出回呼取得結果。
 def test_gradio_build_and_callback_with_mocked_dependencies(monkeypatch):
     import app
 
@@ -504,6 +550,7 @@ def test_gradio_build_and_callback_with_mocked_dependencies(monkeypatch):
     assert demo.config["components"]
 
 
+# 確認設定載入失敗時，介面與送出回呼會顯示失敗原因。
 def test_gradio_configuration_failure_is_visible(monkeypatch):
     import app
 

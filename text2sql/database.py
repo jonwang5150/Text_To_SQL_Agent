@@ -9,18 +9,22 @@ from sqlalchemy.exc import SQLAlchemyError
 from config import Settings
 
 
+# 定義查詢結果的欄位、資料列與截斷標記。
 class QueryResult(TypedDict):
     columns: list[str]
     rows: list[tuple[Any, ...]]
     truncated: bool
 
 
+# 統一資料庫錯誤格式，讓流程依錯誤類型決定是否修正 SQL。
 class DatabaseError(RuntimeError):
+    # 保存錯誤訊息與分類，供流程判斷及介面顯示。
     def __init__(self, message: str, kind: str = "database"):
         super().__init__(message)
         self.kind = kind
 
 
+# 建立具備連線逾時與存活檢查的資料庫引擎。
 def create_db_engine(settings: Settings) -> Engine:
     return create_engine(
         settings.database_url, connect_args={"connect_timeout": 5},
@@ -28,6 +32,7 @@ def create_db_engine(settings: Settings) -> Engine:
     )
 
 
+# 將底層例外轉為可顯示的錯誤分類，避免洩漏敏感內容。
 def database_error(exc: SQLAlchemyError) -> DatabaseError:
     """Expose useful SQL diagnostics, never SQLAlchemy's URL/statement traceback."""
     original = getattr(exc, "orig", None)
@@ -56,6 +61,7 @@ def database_error(exc: SQLAlchemyError) -> DatabaseError:
     return DatabaseError(f"資料庫執行失敗（SQLSTATE {code}）。")
 
 
+# 以唯讀交易開啟連線，限制執行時間、鎖定等待與搜尋路徑。
 @contextmanager
 def readonly_connection(engine: Engine, timeout_ms: int) -> Iterator[Connection]:
     """Apply protections locally to this transaction, including metadata reads."""
@@ -70,6 +76,7 @@ def readonly_connection(engine: Engine, timeout_ms: int) -> Iterator[Connection]
         yield conn
 
 
+# 檢查帳號與資料表權限，讀取白名單欄位供模型產生 SQL。
 def load_schema(engine: Engine, settings: Settings) -> str:
     """Called once at startup; only whitelist metadata enters the prompt cache."""
     try:
@@ -116,6 +123,7 @@ def load_schema(engine: Engine, settings: Settings) -> str:
         raise database_error(exc) from None
 
 
+# 以唯讀方式執行已驗證的 SQL，限制回傳筆數並標記截斷結果。
 def execute_sql(engine: Engine, sql: str, settings: Settings) -> QueryResult:
     """Accept only validator output; the graph is the authorized entry point."""
     try:
