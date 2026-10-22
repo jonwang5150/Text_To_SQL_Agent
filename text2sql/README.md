@@ -27,6 +27,7 @@
 | --- | --- |
 | 中文轉 SQL | 透過單一設定的 Ollama 模型，根據問題及資料表 Schema 產生 PostgreSQL SELECT |
 | 查詢白名單 | 只允許 `ALLOWED_TABLES` 內的實體資料表；可在白名單表之間 JOIN |
+| 刪除要求攔截 | 問題含明確刪除、清空或 DELETE／TRUNCATE／DROP TABLE 指令時直接回覆唯讀限制，不呼叫模型、不執行 SQL，也不進入自動修正 |
 | Schema 載入 | 啟動時讀取欄位名稱與型別，檢查帳號權限並快取；不依賴預寫的 AQI 欄位 |
 | SQL 驗證 | 使用 PostgreSQL 方言解析 AST，限制語句、資料來源、函式與型別，重新產生 SQL 後才執行 |
 | SQL 自動修正 | 將問題、Schema、失敗 SQL 與整理後的錯誤交給同一個模型，最多修正三次 |
@@ -38,6 +39,8 @@
 | 本機工作台 | 支援窄螢幕與深淺色外觀；預設只綁定 `127.0.0.1`，不開啟公開分享 |
 
 **只有 SQL 生成與修正會呼叫 LLM。** 查詢結果由 Python 格式化，不另交給模型摘要。使用雲端模型時，問題、白名單 Schema，以及修正時的 SQL 與錯誤資訊仍會傳到模型服務。
+
+例如「請刪除 air_quality_hourly 的所有資料」會直接顯示「已阻擋刪除要求」，本次 SQL 與結果保持空白，修正次數為 0。這層採保守關鍵字檢查，不是完整的自然語言意圖辨識；「查詢已刪除的紀錄」或「不要刪除，請顯示前五筆」等查詢仍可繼續。原有 SQL AST 驗證與 PostgreSQL 唯讀權限持續生效。
 
 ## 快速開始
 
@@ -278,7 +281,7 @@ PostgreSQL 的有效權限可能來自 `PUBLIC` 或其他角色；只對使用�
 flowchart TD
     start([START]) --> schema_loader
     schema_loader -->|成功| sql_generator
-    schema_loader -->|空問題或初始化失敗| answer_generator
+    schema_loader -->|刪除要求、空問題或初始化失敗| answer_generator
     sql_generator -->|取得 SQL| sql_validator
     sql_generator -->|LLM 失敗| answer_generator
     sql_validator -->|通過| sql_executor
@@ -296,7 +299,7 @@ flowchart TD
 
 | 節點 | 職責 |
 | --- | --- |
-| `schema_loader` | 將啟動時快取的 Schema 放入本次狀態，檢查問題非空；不會逐次重讀資料庫 |
+| `schema_loader` | 先攔截刪除要求，再檢查問題非空並注入快取 Schema；不會逐次重讀資料庫 |
 | `sql_generator` | 以固定規則、問題及 Schema 呼叫模型，要求只輸出一條純 SQL |
 | `sql_validator` | 驗證、正規化 SQL，補上表 Schema 與最外層筆數限制 |
 | `sql_executor` | 執行通過驗證的 SQL，取得欄位、資料列及截斷標記 |
@@ -373,6 +376,7 @@ sql_query_agent/
     ├── database.py            # Schema、權限檢查與唯讀 SQL 執行
     ├── graph.py               # LangGraph 狀態、節點連線與條件路由
     ├── nodes.py               # 六個節點、SQL 驗證與結果格式化
+    ├── request_guard.py       # 模型呼叫前的刪除要求攔截
     ├── ui.py                  # 主題與介面 HTML 元件
     ├── ui.css                 # 響應式版面及深淺色樣式
     ├── ui.js                  # 資料表名稱複製與狀態提示
@@ -390,6 +394,7 @@ sql_query_agent/
 | [database.py](database.py) | `QueryResult`／`DatabaseError`；建立引擎、唯讀交易、權限與 Schema 檢查、SQL 執行、錯誤分類 |
 | [graph.py](graph.py) | `AgentState`、`initial_state()`、`build_graph()`、六節點路由及修正／遞迴上限 |
 | [nodes.py](nodes.py) | `SQL_RULES` 提示詞、AST／函式／型別白名單、`validate_sql()`、`format_answer()` 及 `make_nodes()` |
+| [request_guard.py](request_guard.py) | 正規化問題並檢查明確刪除關鍵字，提供固定的唯讀限制回覆 |
 | [ui.py](ui.py) | `APP_THEME`、CSS／JS 檔案載入；頁首、概覽、區塊標題與可搜尋的資料表清單 HTML；動態表名會 HTML escape |
 | [ui.css](ui.css) | 工作台版面、字級、色彩、卡片、捲動區、焦點樣式、深色及響應式設定 |
 | [ui.js](ui.js) | 表名複製、相容備援、成功／失敗提示；事件委派讓搜尋更新後的表名按鈕仍可使用 |
@@ -457,7 +462,7 @@ create_app().launch(
 
 | 範圍 | 代表情境 |
 | --- | --- |
-| 工作流程 | 成功、空問題、空結果、每題新狀態、初始化失敗 |
+| 工作流程 | 成功、刪除要求直接攔截且不呼叫模型／執行器、空問題、空結果、每題新狀態、初始化失敗 |
 | 自動修正 | 驗證及執行錯誤修正、恰好三次停止、第三次修正成功、修正時 LLM 失敗 |
 | SQL 驗證 | 非允許語法、資料來源與函式拒絕；CTE 作用域、表名補全、引號與結果 LIMIT |
 | 資料庫 | 唯讀／逾時設定送出、Schema 讀取、角色與表權限拒絕、串流抓取上限及錯誤分類 |

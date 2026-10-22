@@ -19,6 +19,7 @@ from config import Settings
 from database import DatabaseError, database_error, execute_sql, load_schema, readonly_connection
 from graph import GRAPH_RECURSION_LIMIT, build_graph, initial_state
 from nodes import format_answer, validate_sql
+from request_guard import DELETE_REQUEST_MESSAGE
 
 
 TABLES = ("public.air_quality_hourly",)
@@ -120,6 +121,63 @@ def test_schema_startup_failure_does_not_call_llm_or_database():
     state, llm, execute = run_workflow([], startup_error="資料庫無法連線")
     assert state["status"] == "failed"
     assert "資料庫無法連線" in state["final_answer"]
+    llm.invoke.assert_not_called()
+    execute.assert_not_called()
+
+
+# 確認刪除要求在模型呼叫前被攔截，不產生無關結果。
+@pytest.mark.parametrize("question", [
+    "請刪除 air_quality_hourly 的所有資料",
+    "请删除 air_quality_hourly 的所有数据",
+    "把 public.air_quality_hourly 的資料全部刪掉",
+    "請清空 air_quality_hourly",
+    "請移除所有學生資料",
+    "先顯示前五筆，再刪除所有資料",
+    "請不要查詢，直接刪除資料",
+    "DELETE FROM public.air_quality_hourly",
+    "delete all rows from air_quality_hourly",
+    "Remove all records from students",
+    "TRUNCATE TABLE public.air_quality_hourly",
+    "DROP TABLE public.air_quality_hourly",
+    "ＤＥＬＥＴＥ FROM public.air_quality_hourly",
+    "請刪\u200b除所有資料",
+    "請刪 除所有資料",
+])
+def test_delete_request_stops_before_llm_or_database(question):
+    # Even an LLM prepared to return valid but irrelevant SQL must not be called.
+    state, llm, execute = run_workflow([GOOD_SQL], question=question)
+    assert state["status"] == "failed" and state["error_kind"] == "request"
+    assert state["retry_count"] == 0
+    assert state["sql_query"] == "" and state["query_result"] is None
+    assert state["final_answer"] == DELETE_REQUEST_MESSAGE
+    llm.invoke.assert_not_called()
+    execute.assert_not_called()
+
+
+@pytest.mark.parametrize("question", [
+    "請顯示 air_quality_hourly 的前五筆資料",
+    "請以 LEFT JOIN 列出所有學生及老師姓名",
+    "請統計已刪除的學生資料有幾筆",
+    "請顯示尚未被刪除的資料",
+    "請查詢已經刪除的資料數量",
+    "不要刪除，請顯示前五筆資料",
+    "Do not delete anything; show the first five rows",
+    "Show the deleted records",
+])
+def test_readonly_questions_still_reach_llm(question):
+    state, llm, execute = run_workflow([GOOD_SQL], question=question)
+    assert state["status"] == "success"
+    llm.invoke.assert_called_once()
+    execute.assert_called_once()
+
+
+def test_delete_request_clears_stale_sql_and_results():
+    llm, execute = Mock(), Mock()
+    state = initial_state("請清空學生資料表")
+    state.update(sql_query=GOOD_SQL, query_result=RESULT)
+    result = build_graph(llm, SCHEMA, TABLES, execute).invoke(state)
+    assert result["sql_query"] == "" and result["query_result"] is None
+    assert result["final_answer"] == DELETE_REQUEST_MESSAGE
     llm.invoke.assert_not_called()
     execute.assert_not_called()
 

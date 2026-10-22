@@ -10,6 +10,7 @@ from sqlglot.errors import ErrorLevel, SqlglotError
 from sqlglot.optimizer.scope import Scope, traverse_scope
 
 from database import DatabaseError, QueryResult
+from request_guard import DELETE_REQUEST_MESSAGE, is_delete_request
 
 if TYPE_CHECKING:
     from graph import AgentState
@@ -172,8 +173,12 @@ def make_nodes(
             return {"error_message": "Ollama 呼叫失敗，請檢查服務網址、模型名稱、API Key、帳號額度或逾時設定。",
                     "error_kind": "llm", "status": "failed"}
 
-    # 載入快取 Schema，並攔截空白問題或初始化失敗。
+    # 先攔截刪除要求，再載入快取 Schema 或回報初始化問題。
     def schema_loader(state: "AgentState") -> dict:
+        if is_delete_request(state["question"]):
+            return {"schema": "", "sql_query": "", "query_result": None,
+                    "error_message": DELETE_REQUEST_MESSAGE, "error_kind": "request",
+                    "status": "failed"}
         error = startup_error or (None if cached_schema else "Schema 尚未成功載入，請重新啟動。")
         if not state["question"]:
             error = "請輸入中文查詢問題。"
@@ -210,6 +215,8 @@ def make_nodes(
     # 依流程狀態產生查詢答案或包含修正次數的失敗說明。
     def answer_generator(state: "AgentState") -> dict:
         if state["error_message"]:
+            if state["error_kind"] == "request":
+                return {"status": "failed", "final_answer": state["error_message"]}
             return {"status": "failed", "final_answer":
                     f"查詢失敗（已修正 {state['retry_count']} 次）：{state['error_message']}"}
         if state["query_result"] is None:
