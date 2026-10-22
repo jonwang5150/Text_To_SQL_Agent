@@ -1,10 +1,10 @@
 # Mini Text-to-SQL Agent
 
-以中文提問，查詢 PostgreSQL 資料庫的本機資料查詢工作台。應用會生成 SQL、檢查查詢範圍、以唯讀交易執行，遇到可修正的 SQL 錯誤時最多修正三次，最後以繁體中文標籤呈現結果。
+以中文提問，查詢 PostgreSQL 資料庫的本機資料查詢工作台。應用先透過 Request Guard 攔截明確刪除要求，通過後才生成 SQL、檢查查詢範圍並以唯讀交易執行。遇到可修正的 SQL 錯誤時最多修正三次，最後以繁體中文標籤呈現結果。
 
 這是教學與作品展示用的 MVP，主要展示 LangGraph 的狀態管理、條件路由及 SQL 修正流程。查詢對象不限 AQI；設定白名單與適當權限後，即可使用自己的資料表。
 
-**執行路徑：** Gradio 介面 → LangGraph → SQLGlot 驗證 → SQLAlchemy／psycopg → PostgreSQL → Python 格式化結果。
+**每次提問的執行路徑：** Gradio 介面 → LangGraph（`schema_loader` 內先執行 Request Guard）→ LLM 產生 SQL → SQLGlot 驗證 → SQLAlchemy／psycopg 唯讀查詢 → Python 格式化結果。刪除要求在 Guard 階段直接轉入固定回覆，不進入模型生成與 SQL 執行。
 
 ## 目錄
 
@@ -15,6 +15,7 @@
 - [介面操作](#介面操作)
 - [SQL 支援範圍](#sql-支援範圍)
 - [LangGraph 工作流程](#langgraph-工作流程)
+- [Request Guard 刪除要求攔截](#request-guard-刪除要求攔截)
 - [資料庫執行與結果呈現](#資料庫執行與結果呈現)
 - [專案結構](#專案結構)
 - [測試與驗證](#測試與驗證)
@@ -40,7 +41,7 @@
 
 **只有 SQL 生成與修正會呼叫 LLM。** 查詢結果由 Python 格式化，不另交給模型摘要。使用雲端模型時，問題、白名單 Schema，以及修正時的 SQL 與錯誤資訊仍會傳到模型服務。
 
-例如「請刪除 air_quality_hourly 的所有資料」會直接顯示「已阻擋刪除要求」，本次 SQL 與結果保持空白，修正次數為 0。這層採保守關鍵字檢查，不是完整的自然語言意圖辨識；「查詢已刪除的紀錄」或「不要刪除，請顯示前五筆」等查詢仍可繼續。原有 SQL AST 驗證與 PostgreSQL 唯讀權限持續生效。
+Request Guard 的呼叫位置、比對規則與案例見[刪除要求攔截說明](#request-guard-刪除要求攔截)。它處理輸入問題，SQL AST 驗證處理模型輸出，PostgreSQL 唯讀交易與權限則限制實際執行。
 
 ## 快速開始
 
@@ -275,13 +276,21 @@ PostgreSQL 的有效權限可能來自 `PUBLIC` 或其他角色；只對使用�
 
 ## LangGraph 工作流程
 
-流程以 LangGraph 的 `StateGraph(AgentState)` 建立，使用六個節點與 Conditional Edges 串接 SQL 生成、驗證、執行及自動修正。每次提問都從新的 State 開始，依執行結果決定下一個節點，最後由 `answer_generator` 產生回答。
+流程以 LangGraph 的 `StateGraph(AgentState)` 建立，仍使用六個節點。每次提問先由 `initial_state()` 建立新的 State，進入 `schema_loader` 後，第一步呼叫 `request_guard.is_delete_request()`。被攔截時直接轉入 `answer_generator`；通過後才檢查初始化狀態、注入快取 Schema，再進入 SQL 生成、驗證、執行及修正流程。
+
+下圖將 `schema_loader` 的內部步驟展開，**Request Guard 是該節點呼叫的函式，不是第七個 LangGraph 節點**。`repair_check` 同樣代表條件路由判斷，不是額外註冊的節點。
 
 ```mermaid
 flowchart TD
-    start([START]) --> schema_loader
-    schema_loader -->|成功| sql_generator
-    schema_loader -->|刪除要求、空問題或初始化失敗| answer_generator
+    start([START]) --> guard
+    subgraph schema_loader["schema_loader：輸入檢查與快取 Schema"]
+        guard{"Request Guard<br/>是否為刪除要求？"}
+        schema_check["檢查空問題與初始化狀態<br/>注入快取 Schema"]
+        guard -->|否| schema_check
+    end
+    guard -->|是：request| answer_generator
+    schema_check -->|成功| sql_generator
+    schema_check -->|失敗：initialization| answer_generator
     sql_generator -->|取得 SQL| sql_validator
     sql_generator -->|LLM 失敗| answer_generator
     sql_validator -->|通過| sql_executor
@@ -294,6 +303,44 @@ flowchart TD
     sql_repair -->|LLM 失敗| answer_generator
     answer_generator --> finish([END])
 ```
+
+### Request Guard 刪除要求攔截
+
+目的：避免模型把「請刪除所有資料」誤解成一般 SELECT，回傳與要求無關的查詢結果。Guard 使用本機規則判斷，無須呼叫 LLM。
+
+#### 呼叫與處理位置
+
+| 程式位置 | 實際行為 |
+| --- | --- |
+| [request_guard.py](request_guard.py) 的 `is_delete_request()` | 正規化問題，檢查刪除動作詞與相鄰前綴，回傳布林值 |
+| [nodes.py](nodes.py) 的 `schema_loader()` | 在注入 Schema 前先執行 Guard；命中時清空本次 Schema、SQL 與查詢結果，設定 `error_kind="request"`、`status="failed"` |
+| [graph.py](graph.py) 的 `after_schema()` | 看到 `error_message` 就直接轉入 `answer_generator`，跳過生成、驗證、執行與修正 |
+| [nodes.py](nodes.py) 的 `answer_generator()` | 對 `request` 類錯誤直接回傳固定訊息，不加上一般 SQL 失敗的修正說明 |
+
+正常每題由 `initial_state()` 將 `retry_count` 設為 0；被 Guard 攔截後不會進入 `sql_repair`，所以仍為 0。介面顯示失敗與固定回覆，SQL 保持空字串、`query_result` 為 `None`，不沿用先前的 SQL 或結果。
+
+固定回覆來自 `DELETE_REQUEST_MESSAGE`：
+
+> 已阻擋刪除要求：此查詢器僅支援唯讀查詢，不能刪除資料或資料表。本次未執行 SQL。
+
+「未執行 SQL」指被攔截的這次提問不會執行業務查詢；應用啟動時既有的資料庫權限檢查與 Schema 讀取仍會正常執行。
+
+#### 比對規則與案例
+
+問題先做 Unicode NFKC 正規化、移除 `Cf` 格式字元（例如零寬字元），並合併中文字之間的空白。接著不分英文字母大小寫，尋找刪除、清空、移除等動作詞，以及 `DELETE`、`TRUNCATE`、`REMOVE`、`ERASE`、`PURGE`、`WIPE`、`DROP TABLE／DATABASE／SCHEMA` 等英文形式。
+
+程式也檢查動作詞前緊鄰的文字，例如「已」「未」「不要」「請勿」或 `not`，讓部分描述已刪除紀錄或明確否定刪除的問題繼續查詢。一個問題有多個動作詞時，只要其中一個沒有符合這些前綴例外，就會攔截。
+
+| 輸入問題 | Guard 結果 |
+| --- | --- |
+| 請刪除 air_quality_hourly 的所有資料 | 直接阻擋，模型與 SQL 執行器都不呼叫 |
+| 請清空 students | 直接阻擋 |
+| 先顯示前五筆，再刪除所有資料 | 整個要求直接阻擋，不先執行前半段 |
+| `DELETE FROM public.students`、`TRUNCATE TABLE public.students` 或 `DROP TABLE public.students` | 直接阻擋 |
+| 請統計已刪除的學生資料有幾筆 | 通過 Guard，後續仍須依實際欄位產生與驗證 SQL |
+| 不要刪除，請顯示前五筆資料 | 通過 Guard，繼續唯讀查詢流程 |
+
+這是保守的關鍵字與前綴檢查，不能完整理解自然語言，可能誤擋或漏判。它目前針對刪除類要求，沒有替新增、修改等要求建立同樣的入口檢查；產生的 SQL 仍必須通過 AST 驗證及資料庫唯讀限制。調整動作詞、前綴例外或固定回覆時，請一併更新對應測試。
 
 ### 六個節點
 
@@ -310,6 +357,7 @@ flowchart TD
 
 | 錯誤類別 | 處理方式 |
 | --- | --- |
+| `request` | Guard 攔截的刪除要求；直接顯示固定回覆，不呼叫模型、不執行 SQL、不進入修正 |
 | `validation` | AST、白名單或支援範圍未通過，可進入修正 |
 | `query` | SQLSTATE `42*`／`22*` 的語法或資料錯誤，以及 `57014` 查詢取消／逾時，可進入修正 |
 | `connection` | 連線、驗證或部分服務／資源異常，直接失敗 |
@@ -463,6 +511,7 @@ create_app().launch(
 | 範圍 | 代表情境 |
 | --- | --- |
 | 工作流程 | 成功、刪除要求直接攔截且不呼叫模型／執行器、空問題、空結果、每題新狀態、初始化失敗 |
+| Request Guard | 繁簡中文與英文刪除要求、全形字母、零寬字元、中文字間空白、混合查詢／刪除要求、否定前綴、已刪除紀錄查詢，以及清除舊 SQL／結果 |
 | 自動修正 | 驗證及執行錯誤修正、恰好三次停止、第三次修正成功、修正時 LLM 失敗 |
 | SQL 驗證 | 非允許語法、資料來源與函式拒絕；CTE 作用域、表名補全、引號與結果 LIMIT |
 | 資料庫 | 唯讀／逾時設定送出、Schema 讀取、角色與表權限拒絕、串流抓取上限及錯誤分類 |
@@ -470,13 +519,21 @@ create_app().launch(
 | 原生 HTTP 回應 | Mock transport 驗證 `/api/chat`、Bearer、HTTP timeout、最終 SQL 與獨立 thinking 欄位分離、401 失敗不執行 SQL |
 | Gradio | Mock 初始化後的送出 callback、SQL 與結果回傳、設定失敗可見 |
 
+只看 Request Guard 相關測試：
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest -v tests/test_workflow.py -k "delete_request or readonly_questions"
+```
+
+這組測試使用真實 Graph 與 Mock LLM／執行器，確認被攔截時兩者皆未呼叫、修正次數為 0、SQL 與結果清空；同時確認一般問題、JOIN 與前綴例外仍可繼續。測試不會真的刪除任何資料。
+
 只看修正流程可使用：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -v tests/test_workflow.py -k "syntax_error_repaired or database_sql_error_repaired or third_repair_can_succeed or stops_after_exactly_three_repairs"
 ```
 
-**本次驗證（2026-10-21）：** Windows／Python 3.12.7，`106 passed`，`pip check` 無相依衝突。
+**最近完整離線測試（2026-10-22）：** Windows／Python 3.12.7，`130 passed`，包含 24 個 Request Guard 相關案例。先前相依檢查（2026-10-21）的 `pip check` 無相依衝突。
 
 這些離線測試不能證明真實帳號已通過權限檢查，也不能取代 PostgreSQL 唯讀阻擋、逾時、驅動串流或雲端模型的實測。本次文件更新未呼叫真實模型或執行實際資料庫查詢；部署前應另外確認連線、一般查詢、空結果、截斷及權限限制。
 
@@ -484,6 +541,7 @@ create_app().launch(
 
 | 現象 | 原因與處理方式 |
 | --- | --- |
+| 顯示「已阻擋刪除要求」，SQL 為空且修正 0 次 | Request Guard 在模型生成前攔截；本次提問未執行 SQL。請改成符合唯讀用途的查詢問題 |
 | 缺少環境變數 | 檢查 `text2sql/.env` 與必填值；留意系統環境變數優先，不會被 `.env` 蓋掉 |
 | `DATABASE_URL` 格式不符 | 使用 `postgresql+psycopg://`；帳密中的保留字元須 URL encode |
 | 白名單設定被拒絕 | 使用小寫 `schema.table`，移除系統 Schema、特殊字元及空項目 |
@@ -510,6 +568,7 @@ SELECT
 
 ## 已知限制
 
+- **Request Guard 範圍：** 以動作詞與相鄰前綴攔截明確刪除要求，不是通用的意圖分類或完整提示注入防護；特殊改寫可能漏判，描述性文字也可能被誤擋。SQL AST 驗證及 PostgreSQL 唯讀交易與權限仍不可省略。
 - **用途與安全邊界：** 適用受控資料庫的本機 MVP。SQL Parser 不是安全沙箱；唯讀交易也不能阻止所有函式或外部資料來源的副作用。資料庫、物件建立者、型別、運算子、政策及擴充套件須可信任。
 - **權限檢查範圍：** 啟動檢查不是完整 PostgreSQL 權限稽核，未完整盤點所有角色、其他 Schema、欄位層級授權、自訂函式與擴充能力。帳號不應擁有資料庫物件或伺服器檔案／程式執行能力。
 - **查詢正確性：** SQL 能執行不代表問題理解正確；應審閱日期、時區、JOIN、分組與 NULL 語意。沒有業務字典，亦不自動推知單位、時區或主外鍵關係。
