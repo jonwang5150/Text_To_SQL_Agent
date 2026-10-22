@@ -19,7 +19,7 @@ from config import Settings
 from database import DatabaseError, database_error, execute_sql, load_schema, readonly_connection
 from graph import GRAPH_RECURSION_LIMIT, build_graph, initial_state
 from nodes import format_answer, validate_sql
-from request_guard import DELETE_REQUEST_MESSAGE
+from request_guard import WRITE_REQUEST_MESSAGE
 
 
 TABLES = ("public.air_quality_hourly",)
@@ -125,7 +125,7 @@ def test_schema_startup_failure_does_not_call_llm_or_database():
     execute.assert_not_called()
 
 
-# 確認刪除要求在模型呼叫前被攔截，不產生無關結果。
+# 確認新增、刪除、修改與結構異動在模型呼叫前被攔截。
 @pytest.mark.parametrize("question", [
     "請刪除 air_quality_hourly 的所有資料",
     "请删除 air_quality_hourly 的所有数据",
@@ -142,14 +142,56 @@ def test_schema_startup_failure_does_not_call_llm_or_database():
     "ＤＥＬＥＴＥ FROM public.air_quality_hourly",
     "請刪\u200b除所有資料",
     "請刪 除所有資料",
+    "請新增一位學生到 students",
+    "请新增一条学生数据",
+    "幫我插入一筆老師資料",
+    "請匯入學生資料",
+    "請在 students 加入一筆新資料",
+    "請建立一張新的教師資料表",
+    "新增 students 的 email 欄位",
+    "請修改學生的成績",
+    "请修改所有学生的成绩",
+    "把 students 裡張小明的成績改成 100",
+    "將 students 的姓名改為王小明",
+    "請將學生的分數設為 90",
+    "把 students 的成績全部加上 10 分",
+    "更新老師的授課科目",
+    "請把 student_name 欄位重新命名為 name",
+    "先列出學生，再更新成績",
+    "請查詢學生資料，並更新狀態為完成",
+    "不要刪除，但請新增一筆學生資料",
+    "請不要修改，直接新增一位學生",
+    "INSERT INTO public.students (student_name) VALUES ('Demo')",
+    "UPDATE public.students SET score = 100",
+    "ALTER TABLE public.students ADD COLUMN email text",
+    "CREATE TABLE public.demo (id integer)",
+    "/* sample */ INSERT INTO public.students (student_name) VALUES ('Demo')",
+    "SELECT 1; UPDATE public.students SET score=100",
+    "WITH changed AS (UPDATE public.students SET score=100 RETURNING *) SELECT * FROM changed",
+    "SELECT * INTO public.students_backup FROM public.students",
+    "MERGE INTO public.students USING public.teachers ON true WHEN MATCHED THEN UPDATE SET score=100",
+    "COPY public.students FROM STDIN",
+    "Insert a student into students",
+    "Update all student scores to 100",
+    "Add a student to students",
+    "Create a teachers table",
+    "Set the score to 100",
+    "Rename the students table",
+    "ＵＰＤＡＴＥ public.students SET score=100",
+    "請新\u200b增學生資料",
+    "請修 改學生資料",
+    "請建一張學生資料表",
+    "請建表 students_backup",
+    "把學生名字換成王小明",
+    "請將學生成績調整到 90",
 ])
-def test_delete_request_stops_before_llm_or_database(question):
+def test_write_request_stops_before_llm_or_database(question):
     # Even an LLM prepared to return valid but irrelevant SQL must not be called.
     state, llm, execute = run_workflow([GOOD_SQL], question=question)
     assert state["status"] == "failed" and state["error_kind"] == "request"
     assert state["retry_count"] == 0
     assert state["sql_query"] == "" and state["query_result"] is None
-    assert state["final_answer"] == DELETE_REQUEST_MESSAGE
+    assert state["final_answer"] == WRITE_REQUEST_MESSAGE
     llm.invoke.assert_not_called()
     execute.assert_not_called()
 
@@ -163,6 +205,31 @@ def test_delete_request_stops_before_llm_or_database(question):
     "不要刪除，請顯示前五筆資料",
     "Do not delete anything; show the first five rows",
     "Show the deleted records",
+    "請統計今天新增的學生人數",
+    "請查詢 2025 年新增的學生",
+    "請顯示最近修改過的資料",
+    "請列出資料的更新時間",
+    "請顯示老師最後更新日期",
+    "請查詢學生的修改紀錄",
+    "請列出資料表的建立日期",
+    "請顯示已新增的學生",
+    "請顯示尚未修改的資料",
+    "請不要新增資料，只顯示前五筆",
+    "不用修改，請統計學生人數",
+    "Do not update anything; show five students",
+    "Show recently updated students",
+    "Show the update history of students",
+    "Show the creation date of the students table",
+    "查詢學生人數增加多少",
+    "請計算學生成績加上 10 的結果",
+    "請計算學生資料的成績加上 10 的結果",
+    "請計算成績資料增加 10 後的數值",
+    "Please calculate the score data add 10",
+    "請將查詢結果依成績由高到低排序",
+    "SELECT 'UPDATE students SET score=100' AS example",
+    "SELECT '請刪除全部資料' AS example",
+    'SELECT "update" FROM public.students',
+    "WITH recent AS (SELECT * FROM public.students) SELECT * FROM recent",
 ])
 def test_readonly_questions_still_reach_llm(question):
     state, llm, execute = run_workflow([GOOD_SQL], question=question)
@@ -171,13 +238,14 @@ def test_readonly_questions_still_reach_llm(question):
     execute.assert_called_once()
 
 
-def test_delete_request_clears_stale_sql_and_results():
+@pytest.mark.parametrize("question", ["請清空學生資料表", "請新增一筆學生資料", "請更新學生的成績"])
+def test_write_request_clears_stale_sql_and_results(question):
     llm, execute = Mock(), Mock()
-    state = initial_state("請清空學生資料表")
+    state = initial_state(question)
     state.update(sql_query=GOOD_SQL, query_result=RESULT)
     result = build_graph(llm, SCHEMA, TABLES, execute).invoke(state)
     assert result["sql_query"] == "" and result["query_result"] is None
-    assert result["final_answer"] == DELETE_REQUEST_MESSAGE
+    assert result["final_answer"] == WRITE_REQUEST_MESSAGE
     llm.invoke.assert_not_called()
     execute.assert_not_called()
 
